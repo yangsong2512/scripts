@@ -1,6 +1,7 @@
 #!/usr/bin/python
 #-*-coding:utf-8 -*-
 import sys
+import locale
 import os
 import collections
 import time
@@ -13,6 +14,7 @@ from PyQt4.QtSql import *
 
 
 global run_system
+global language
 
 class SignalObject(QObject):
 	compilerSignal = pyqtSignal(str,int)
@@ -38,7 +40,6 @@ class NetServer(QRunnable):
 			self.client.close()
 	def quit(self):
 		self.app_closed = True
-		self.stop()
 		self.server.close()
 
 
@@ -100,7 +101,8 @@ class TSTools(QWidget):
 
 	def closeEvent(self,event):
 		print "APP will be closed"
-		self.netserver.quit()
+		if self.toolsType == 1:
+			self.netserver.quit()
 
 	def initDB(self):
 		self.first = False
@@ -135,9 +137,14 @@ class TSTools(QWidget):
 							item.setCurrentIndex(k)
 
 	def initUI(self):
-		self.labels=[u"内核路径",u"模块路径",u"输出路径",u"编译工具"]
-		self.toolnames = [[u"编译内核",u"编译模块",u"编译全部"],[u"输出内核",u"输出模块",u"输出全部"],\
-				[u"保存参数","",u"重置参数"]]
+		if language == 0:
+			self.labels=[u"内核路径",u"模块路径",u"输出路径",u"编译工具"]
+			self.toolnames = [[u"编译内核",u"编译模块",u"编译全部"],[u"输出内核",u"输出模块",u"输出全部"],\
+					[u"保存参数","",u"重置参数"]]
+		elif language == 1:
+			self.labels=["Top Dir","Module Dir","Out Dir","Tool Dir"]
+			self.toolnames = [["Compile Kernel","Compile Module","Compile All"],["Output Kernel","Output Module","Output All"],\
+					["Save Paths","","Reset Paths"]]
 
 		self.tp = QThreadPool()
 
@@ -198,7 +205,10 @@ class TSTools(QWidget):
 		vbox.addLayout(self.tools)
 		
 		self.setLayout(vbox)
-		self.setWindowTitle(u"内核编译")
+		if language == 0:
+			self.setWindowTitle(u"内核编译")
+		elif language == 1:
+			self.setWindowTitle("Kernel Compile Tool")
 		self.show()
 
 
@@ -230,32 +240,59 @@ class TSTools(QWidget):
 	def slotTestSignal(self,status,what):
 		if status == "running":
 			if what == 0:
-				ch = u"内核正在编译中"
+				if language == 0:
+					ch = u"内核正在编译中"
+				elif language == 1:
+					ch = "Compiling Kernel"
 			if what == 1:
-				ch = u"模块正在编译中"
+				if language == 0:
+					ch = u"模块正在编译中"
+				elif language == 1:
+					ch = "Compiling Module"
 			if what == 2:
 				ch = u"正在编译"
 			color = "yellow"
 		elif status == "pass":
 			color = "green"
 			if what == 0:
-				ch = u"内核编译通过"
+				if language == 0:
+					ch = u"内核编译通过"
+				elif language == 1:
+					ch = "Kernel Compile Pass"
 			if what == 1:
-				ch = u"模块编译通过"
+				if language == 0:
+					ch = u"模块编译通过"
+				elif language == 1:
+					ch= "Module Compile Pass"
 			if what == 2:
-				ch = u"全部编译通过"
+				if language == 0:
+					ch = u"全部编译通过"
+				elif language == 1:
+					ch = "All Compile Pass"
 		elif status == "fail":
 			color = "red"
 			if what == 0:
-				ch = u"内核编译失败"
+				if language == 0:
+					ch = u"内核编译失败"
+				elif language == 1:
+					ch = "Kernel Compile Failed"
 			if what == 1:
-				ch = u"模块编译失败"
+				if language == 0:
+					ch = u"模块编译失败"
+				elif language == 1:
+					ch = "Module Compile Failed"
 		elif status == "nothing":
 			color = "blue"
 			if what == 0:
-				ch = u"内核未编译"
+				if language == 0:
+					ch = u"内核未编译"
+				elif language == 1:
+					ch = "Kernel Not Compiled"
 			if what == 1:
-				ch = u"模块未编译"
+				if language == 0:
+					ch = u"模块未编译"
+				elif language == 1:
+					ch = "Module Not Compiled"
 
 		self.status.setText(ch)
 		self.palette.setColor(self.status.backgroundRole(),QColor("%s" %color))
@@ -334,19 +371,24 @@ class TSTools(QWidget):
 			self.default[keys[row]]
 			print self.default[keys[row]]
 			
+def getLanguageType():
+	ll=locale.getdefaultlocale()
+	if ll[0] == "zh_CN":
+		return 0
+	elif ll[0] == "en_US":
+		return 1
 def main():
-
 	app = QApplication(sys.argv)
-	if len(sys.argv) < 2:
-		return
-	if sys.argv[1] == "-c":
-		T = TSTools(0)
-	elif sys.argv[1] == "-s":
-		T = TSTools(1)
-	else:
-		T = TSTools(-1)
+	if(len(sys.argv) > 1):
+		if sys.argv[1] == "-c":
+			T = TSTools(0)
+		elif sys.argv[1] == "-s":
+			T = TSTools(1)
+	T = TSTools(-1)
 	sys.exit(app.exec_())
 if __name__ == "__main__":
+	language = getLanguageType()
+	print language
 	run_system = platform.system()
 	main()
 
