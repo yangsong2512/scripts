@@ -44,7 +44,6 @@ class ClientSend(QRunnable):
 			if self.col == 1 or self.col == 2:
 				filename = "%s" %self.out+"\\"+"cn1100_linux_"+getFormatTime("%m%d%H%M")+".ko"
 				files.append(filename)
-			print files
 			for i in range(0,len(files)):
 				fp = open(files[i],"wb+")
 				while True:
@@ -55,6 +54,10 @@ class ClientSend(QRunnable):
 						break
 					else:
 						fp.write(buf)
+		elif self.message.split(":")[0] == "put":
+			pass
+		elif self.message.split(":")[0] == "compile":
+			pass
 class NetClient:
         def __init__(self,addr,port,tp):
                 self.addr = addr 
