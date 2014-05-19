@@ -17,15 +17,49 @@ from PyQt4.QtSql import *
 global run_system
 global language
 
+def getFormatTime(fmt):
+	curtime = time.strftime("%s" %fmt,time.localtime())
+	return curtime
 
 class SignalObject(QObject):
         compilerSignal = pyqtSignal(str,int)
         networkSignal = pyqtSignal(str)
 
-class NetClient():
-        def __init__(self,addr,port):
+class ClientSend(QRunnable):
+	def __init__(self,client,message,col,out):
+		QRunnable.__init__(self)
+		self.obj = SignalObject()
+		self.client = client
+		self.message = message
+		self.col = col
+		self.out = out
+
+	def run(self):
+		if self.message.split(":")[0] == "get":
+			files = []
+			self.client.client.send("%s" %self.message)
+			if self.col == 0 or self.col == 2:
+				filename = "%s" %self.out+"\\"+"kernel_"+getFormatTime("%m%d%H%M")+".img"
+				files.append(filename)
+			if self.col == 1 or self.col == 2:
+				filename = "%s" %self.out+"\\"+"cn1100_linux_"+getFormatTime("%m%d%H%M")+".ko"
+				files.append(filename)
+			print files
+			for i in range(0,len(files)):
+				fp = open(files[i],"wb+")
+				while True:
+					buf = self.client.client.recv(1024)
+					self.client.client.send("success")
+					if buf == "complete":
+						print "receive image success"
+						break
+					else:
+						fp.write(buf)
+class NetClient:
+        def __init__(self,addr,port,tp):
                 self.addr = addr 
                 self.port = port
+		self.tp = tp
         def connect(self):
                 self.client = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
                 self.client.connect((self.addr,self.port))
@@ -37,8 +71,9 @@ class NetClient():
 	
 	def sendThread(self,fd):
 		thread.exit_thread()
-	def sendFile(self,fd):
-		thread.start_new_thread(sendThread(fd))
+	def sendFile(self,message):
+		runnable = ClientSend(self.client,message)
+		self.tp.start(runnable)
         def sendMessage(self,message):
                 self.client.send(message)
                 reply = self.client.recv(512)
@@ -174,6 +209,25 @@ class NetServer(QRunnable):
 						self.client.send("ok")
 					else:
 						self.client.send("fail")
+			elif types[0] == "get":
+				images = []
+				if types[1] == "kernel" or types[1] == "all":
+					if self.platform == "Rockchip":
+						images.append(self.kversion+"/kernel.img")
+				if types[1] == "module" or types[1] == "all":
+					images.append(self.module+"/cn1100_linux.ko")
+				for i in range(0,len(images)):
+					print "send %s" %images[i]
+					fp = open(images[i],"rb")
+					while True:
+						buf = fp.read(1024)
+						if not buf:
+							self.client.send("complete")
+							self.client.recv(512)
+							break
+						else:
+							self.client.send(buf)
+							self.client.recv(512)
 			elif message == "quit":
 				self.client.close()
 				break
@@ -326,6 +380,7 @@ class TSTools(QWidget):
 						       reply = self.netclient.sendMessage("over")
 						       break;
 					       reply = self.netclient.sendMessage(buf)
+#					       self.netclient.sendFile(buf)
 
         def closeEvent(self,event):
                 print "APP will be closed"
@@ -423,7 +478,7 @@ class TSTools(QWidget):
                                         if run_system == "Linux":
                                                 wg = QPushButton(u"浏览")
                                         elif run_system == "Windows":
-						if i == 1 or i == 3:
+						if i == 1 or i == 2:
 							wg = QPushButton(u"浏览")
 						else:
 							wg = QPushButton(u"设置")
@@ -441,7 +496,7 @@ class TSTools(QWidget):
                         self.netserver.obj.networkSignal.connect(self.onNetWork)
                         self.tp.start(self.netserver)
                 elif self.toolsType == 0:
-                        self.netclient = NetClient("192.168.1.105",1234)
+                        self.netclient = NetClient("192.168.1.105",1234,self.tp)
                         status = self.netclient.connect()
                         if status:
                                 print "connect to server success"
@@ -531,6 +586,8 @@ class TSTools(QWidget):
 				if reply == "ready":
 					self.sendDir(self.sender().text())
 					self.netclient.sendMessage("complete")
+			elif row == 2:
+				self.out = lineEdit.text()
 
         def slotTestSignal(self,status,what):
                 if status == "running":
@@ -622,7 +679,15 @@ class TSTools(QWidget):
 				runnable.obj.compilerSignal.connect(self.slotTestSignal)
 				self.tp.start(runnable)
                 elif row == 1:
-                        pass
+			files = []
+			if col == 0:
+				cmd = "get:kernel"
+			elif col == 1:
+				cmd = "get:module"
+			elif col == 2:
+				cmd = "get:all"
+                        self.worker = ClientSend(self.netclient,cmd,col,self.out)
+                        self.tp.start(self.worker)
                 elif row == 2:
                         ok = self.db.open()
                         if ok:
@@ -637,6 +702,7 @@ class TSTools(QWidget):
 
                                         for key in self.default.keys():
                                                 cmd = "update TSTools set path=\"%s\" where name=\"%s\"" %(self.default[key],key)
+						print cmd
                                                 query.exec_(cmd)
                                 if col == 2:
                                         for key in self.default.keys():
@@ -716,7 +782,7 @@ class TSTools(QWidget):
 		filename = self.sender().currentText()
 		abspath = self.config_path+"/"+filename
 		self.config_title.setText(abspath)
-		fp = open(abspath,"rw")
+		fp = open(abspath,"w+")
 		i = 1
 		for line in fp.readlines():
 			print line
@@ -757,7 +823,7 @@ class TSTools(QWidget):
                         fname = QFileDialog.getExistingDirectory(self,'Open file','/')
                         self.path.itemAtPosition(row,1).widget().setText(fname)
                 elif run_system == "Windows":
-                        if row == 1 or row == 3:
+                        if row == 1 or row == 2:
 				fname = QFileDialog.getExistingDirectory(self,'Open file','/')
 				self.path.itemAtPosition(row,1).widget().setText(fname)
 			elif row == 0:
