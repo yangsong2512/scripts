@@ -23,38 +23,112 @@ def getFormatTime(fmt):
 
 class SignalObject(QObject):
         compilerSignal = pyqtSignal(str,int)
-        networkSignal = pyqtSignal(str)
+        networkSignal = pyqtSignal(str,int)
 
 class ClientSend(QRunnable):
-	def __init__(self,client,message,col,out):
+	def __init__(self,client):
 		QRunnable.__init__(self)
 		self.obj = SignalObject()
 		self.client = client
+	def setArgs(self,message,num,arg):
 		self.message = message
-		self.col = col
-		self.out = out
+		self.col = num
+		self.out = arg
+	def sendMessage(self,message):
+		self.client.client.send(message)
+		return self.client.client.recv(512)
 
+	def genLinuxDir(self,lists):
+		target = ""
+		index = 0
+		for i in range(0,len(lists)):
+			if lists[i] == "CN1100":
+				index = i
+				break
+		for i in range(index+1,len(lists)):	
+			target += lists[i]+"/"
+
+		return target
+	def sendDir(self,topdir):
+		dirlist = os.listdir(topdir)
+		for f in dirlist:
+			curdir = topdir+"\\"+f
+			print curdir
+			if os.path.isdir(curdir):
+				senddir = self.genLinuxDir((curdir).split("\\"))
+				tmp = "D:"+senddir
+				reply = self.sendMessage(tmp)
+				self.sendDir(curdir)
+			elif os.path.isfile(curdir):
+				sendfile = self.genLinuxDir((curdir).split("\\"))[:-1]
+				reply = self.sendMessage("F:"+sendfile)
+				if reply == "sReady":
+					fp = open(curdir,"rb")
+					while True:
+					       buf = fp.read(1024)
+					       if not buf:
+						       reply = self.sendMessage("over")
+						       break;
+					       reply = self.sendMessage(buf)
 	def run(self):
-		if self.message.split(":")[0] == "get":
+		cmd = self.message.split(":")
+		if cmd[0] == "pull":
 			files = []
 			self.client.client.send("%s" %self.message)
 			if self.col == 0 or self.col == 2:
-				filename = "%s" %self.out+"\\"+"kernel_"+getFormatTime("%m%d%H%M")+".img"
+				filename = "%s" %self.out+"\\"+"kernel_"+getFormatTime("%m%d%H%M")+"_%s" %cmd[2]+".img"
 				files.append(filename)
 			if self.col == 1 or self.col == 2:
 				filename = "%s" %self.out+"\\"+"cn1100_linux_"+getFormatTime("%m%d%H%M")+".ko"
 				files.append(filename)
 			print files
+			status = True
 			for i in range(0,len(files)):
+				self.obj.networkSignal.emit(self.message+":running",-1)
 				fp = open(files[i],"wb+")
 				while True:
 					buf = self.client.client.recv(1024)
 					self.client.client.send("success")
 					if buf == "complete":
-						print "receive image success"
-						break
+						if self.col != 2:
+							self.obj.networkSignal.emit(self.message+":ok",-1)
+							break
+						else:
+							break
+					elif buf.split(":")[0] == "miss":
+						if self.col != 2:
+							self.obj.networkSignal.emit(self.message+":miss",-1)
+							break
+						else:
+							status = False
+							break
 					else:
 						fp.write(buf)
+			if self.col == 2:
+				if not status:
+					self.obj.networkSignal.emit(self.message+":miss",-1)
+				else:
+					self.obj.networkSignal.emit(self.message+":ok",-1)
+		elif cmd[0] == "push":
+			if cmd[1] == "module":
+				self.obj.networkSignal.emit(self.message+":running",-1)
+				reply = self.sendMessage(self.message)
+				self.sendDir(self.out)	
+				self.sendMessage("complete")
+				self.obj.networkSignal.emit(self.message+":ok",-1)
+		elif cmd[0] == "compile":
+			if cmd[1] == "all":
+				lists = ["compile:kernel","compile:module"]
+				for i in range(0,len(lists)):
+					self.obj.networkSignal.emit(lists[i]+":running",self.col)
+					self.client.client.send("%s" %lists[i])
+					reply = self.client.client.recv(512)
+					self.obj.networkSignal.emit("compile:"+reply,self.col)
+			else:
+				self.obj.networkSignal.emit(self.message+":running",self.col)
+				self.client.client.send("%s" %self.message)
+				reply = self.client.client.recv(512)
+				self.obj.networkSignal.emit("compile:"+reply,self.col)
 class NetClient:
         def __init__(self,addr,port,tp):
                 self.addr = addr 
@@ -69,11 +143,6 @@ class NetClient:
                 else:
                         return False
 	
-	def sendThread(self,fd):
-		thread.exit_thread()
-	def sendFile(self,message):
-		runnable = ClientSend(self.client,message)
-		self.tp.start(runnable)
         def sendMessage(self,message):
                 self.client.send(message)
                 reply = self.client.recv(512)
@@ -89,7 +158,7 @@ class NetServer(QRunnable):
 		self.out = ""
 		self.toolchain = ""
                 self.obj = SignalObject()
-                self.host = "192.168.1.105"
+                self.host = "192.168.1.103"
                 self.port = port
                 self.app_closed = False
 
@@ -158,9 +227,7 @@ class NetServer(QRunnable):
 					tmp = self.vender+"/"+"%s" %types[1]+"/bin/"
 					self.toolchain = tmp
 					if os.path.exists(tmp):
-						print tmp
 						for name in os.listdir(tmp)[0].split("-")[0:-1]:
-							print name
 							self.toolchain+=name
 							self.toolchain+="-"
 					else:
@@ -217,7 +284,6 @@ class NetServer(QRunnable):
 				if types[1] == "module" or types[1] == "all":
 					images.append(self.module+"/cn1100_linux.ko")
 				for i in range(0,len(images)):
-					print "send %s" %images[i]
 					fp = open(images[i],"rb")
 					while True:
 						buf = fp.read(1024)
@@ -241,7 +307,6 @@ class NetServer(QRunnable):
 			elif platform == "Rockchip":
 				status = subprocess.call(["make","ARCH=arm","CROSS_COMPILE=%s" %self.toolchain,"-C","%s" %self.kversion,"kernel.img"])
                 if (what == 1 or what == 2) and (module != ""):
-			print "kernel:"+kernel
                         status = subprocess.call(["make","CROSS_COMPILE=%s" %self.toolchain,"KERNEL=%s" %kernel,"MODULE=%s" %module,"-C","%s" %module])
                         compile_status = True
                 if compile_status:
@@ -337,6 +402,7 @@ class Compiler(QRunnable):
                 else:
                         self.obj.compilerSignal.emit("nothing",self.what)
 
+##Main Class
 class TSTools(QWidget):
         def __init__(self,s):
                 super(TSTools,self).__init__()
@@ -346,12 +412,12 @@ class TSTools(QWidget):
                 self.out = ""
                 self.toolchain = ""
                 self.default = collections.OrderedDict([("kernel",""),("module",""),("out",""),\
-                                ("toolchain",""),("platform",""),("vender",""),("version","")])
+                                ("toolchain",""),("platform",""),("vender",""),("version",""),("toolchain_version",""),("resolution","")])
                 self.palette = QPalette()
                 self.initDB()           
                 self.initUI()
-                self.initDT()
 
+	##generate linux directory,so server can recognize
 	def genLinuxDir(self,lists):
 		target = ""
 		for i in range(2,len(lists)):
@@ -360,6 +426,12 @@ class TSTools(QWidget):
 		return target
 
 
+	##send directory fucntion
+	##1.list all files in current directory
+	##2.judge whether file is directory or file
+	##3.if is directory then recall the function
+	##4.if is file,then send file
+	##5.recv will block,so we used it to sync
 	def sendDir(self,topdir):
 		dirlist = os.listdir(topdir)
 		for f in dirlist:
@@ -380,8 +452,8 @@ class TSTools(QWidget):
 						       reply = self.netclient.sendMessage("over")
 						       break;
 					       reply = self.netclient.sendMessage(buf)
-#					       self.netclient.sendFile(buf)
 
+	##this was called when window was closed
         def closeEvent(self,event):
                 print "APP will be closed"
                 if self.toolsType == 1:
@@ -389,6 +461,7 @@ class TSTools(QWidget):
 		elif self.toolsType == 0:
 			self.netclient.sendMessage("quit")
 
+	##connect to data base
         def initDB(self):
                 self.first = False
                 self.db = QSqlDatabase.addDatabase("QSQLITE") 
@@ -411,21 +484,12 @@ class TSTools(QWidget):
                         self.db.close()
                 else:
                         print "connect database failed"
-        def initDT(self):
-                keys = self.default.keys()[4:len(self.default)]
-                if self.path.itemAtPosition(0,1).widget().text() != "":
-                        for i in range(0,self.lists.rowCount()):
-                                for j in range(0,self.lists.columnCount()):
-                                        item = self.lists.itemAtPosition(i,j).widget()
-                                        for k in range(0,item.count()):
-                                                if item.itemText(k) == self.default[keys[j]]:
-                                                        item.setCurrentIndex(k)
 
         def initUI(self):
                 if language == 0:
                         self.labels=[u"内核路径",u"模块路径",u"输出路径",u"编译工具"]
                         self.toolnames = [[u"编译内核",u"编译模块",u"编译全部"],[u"输出内核",u"输出模块",u"输出全部"],\
-                                        [u"保存参数","",u"重置参数"]]
+                                        [u"保存参数",u"更新源码",u"重置参数"]]
                 elif language == 1:
                         self.labels=["Top Dir","Module Dir","Out Dir","Tool Dir"]
                         self.toolnames = [["Compile Kernel","Compile Module","Compile All"],["Output Kernel","Output Module","Output All"],\
@@ -434,30 +498,29 @@ class TSTools(QWidget):
                 self.tp = QThreadPool()
 
 		self.tab_widget = QTabWidget()
-		self.tab_widget.currentChanged[int].connect(self.onXXXChanged)
+		self.tab_widget.currentChanged[int].connect(self.onTabChanged)
 		tab1 = QWidget()
 		tab2 = QWidget()
+		tab3 = QWidget()
 		
 		self.tab1_layout = QVBoxLayout(tab1)
 		self.tab2_layout = QVBoxLayout(tab2)
+		self.tabe_layout = QVBoxLayout(tab3)
 
 		self.tab_widget.addTab(tab1,u"内核编译")
 		self.tab_widget.addTab(tab2,u"驱动配置")
+		self.tab_widget.addTab(tab3,u"ADB调试")
 
                 self.tools = QGridLayout()
                 for i in range(0,len(self.toolnames)):
                         for j in range(0,len(self.toolnames[0])):
-                                if self.toolnames[i][j] == "":
-                                        tl = QLineEdit(u"编译状态")
-                                        self.status = tl
-                                else:
-                                        tl = QPushButton(self.toolnames[i][j])
-                                        tl.clicked.connect(self.onToolsClicked)
-                                self.tools.addWidget(tl,i,j)
+                                tl = QPushButton(self.toolnames[i][j])
+                                tl.clicked.connect(self.onToolsClicked)
+				self.tools.addWidget(tl,i,j)
 
                 self.lists = QGridLayout()
                 for i in range(0,1):
-                        for j in range(0,4):
+                        for j in range(0,5):
                                 cb = QComboBox()
                                 cb.currentIndexChanged.connect(self.onCurrentIndexChanged)
                                 self.lists.addWidget(cb,i,j)
@@ -470,10 +533,9 @@ class TSTools(QWidget):
                                 if j == 1:
                                         wg = QLineEdit()
                                         if run_system == "Linux":
-                                                wg.textChanged[str].connect(self.textChanged)
+                                                wg.textChanged[str].connect(self.onTextChanged)
                                         elif run_system == "Windows":
-#                                                wg.returnPressed.connect(self.onReturnPressed)
-						wg.textChanged[str].connect(self.textChanged)
+						wg.textChanged[str].connect(self.onTextChanged)
                                 if j == 2:
                                         if run_system == "Linux":
                                                 wg = QPushButton(u"浏览")
@@ -482,24 +544,61 @@ class TSTools(QWidget):
 							wg = QPushButton(u"浏览")
 						else:
 							wg = QPushButton(u"设置")
-                                        wg.clicked.connect(self.browseButtonClicked)
+                                        wg.clicked.connect(self.onBrowseButtonClicked)
                                 self.path.addWidget(wg,i,j)
 
-                paths = self.default.keys()[:4]
-                for i in range(0,len(paths)):
-                        self.path.itemAtPosition(i,1).widget().setText(self.default[paths[i]])
+		self.status = QLineEdit(u"编译状态")
 
                 ##Initialize network here
                 if self.toolsType == 1:
                         print "initial server"
                         self.netserver = NetServer(1234)
-                        self.netserver.obj.networkSignal.connect(self.onNetWork)
                         self.tp.start(self.netserver)
                 elif self.toolsType == 0:
-                        self.netclient = NetClient("192.168.1.105",1234,self.tp)
+                        self.netclient = NetClient("192.168.1.103",1234,self.tp)
+			self.worker = ClientSend(self.netclient)
+			self.worker.obj.networkSignal.connect(self.onParseResult)
                         status = self.netclient.connect()
-                        if status:
-                                print "connect to server success"
+			if status:
+				info = platform.uname()
+				details = ""
+				for i in range(0,len(info)):
+					details += info[i]+":"
+				self.netclient.client.send(details)
+				ch = u"成功连接服务器"
+				color = "green"
+				self.status.setText(ch)
+				self.palette.setColor(self.status.backgroundRole(),QColor("%s" %color))
+				self.status.setPalette(self.palette)
+
+
+		##we first read path from database and save them to dictionary self.default
+		##and here we read from this dictionary and set it as default value
+                paths = self.default.keys()[:4]
+                for i in range(0,len(paths)):
+			value = self.default[paths[i]]
+			if value != "":
+				self.path.itemAtPosition(i,1).widget().setText(value)
+
+		plats = self.default.keys()[4:]
+		for i in range(0,len(plats)):
+			value = self.default[plats[i]]
+			if value != "":
+				item_found = False
+				tmp = self.lists.itemAtPosition(0,i).widget()
+				if tmp.count() == 0:
+					tmp.addItem(value)
+				else:
+					for j in range(0,tmp.count()):
+						if tmp.itemText(j) == value:
+							item_found = True
+							tmp.setCurrentIndex(j)
+							break
+					if not item_found:
+						tmp.addItem(value)
+						tmp.setCurrentIndex(tmp.count()-1)
+
+
 
 		self.initConfig()
 
@@ -507,57 +606,63 @@ class TSTools(QWidget):
                 self.tab1_layout.addLayout(self.path)
                 self.tab1_layout.addLayout(self.lists)
                 self.tab1_layout.addLayout(self.tools)
+		self.tab1_layout.addWidget(self.status)
 		mainlayout.addWidget(self.tab_widget)
                 
                 self.setLayout(mainlayout)
-#                if language == 0:
-#                        self.setWindowTitle(u"内核编译")
-#                elif language == 1:
-#                        self.setWindowTitle("Kernel Compile Tool")
+		self.setWindowTitle(u"驱动编译与调试")
                 self.show()
 
 	def initConfig(self):
 		self.config_path = ""
 		hbox = QHBoxLayout()
-		name = QLabel(u"当前文件")
+		name = QLabel(u"当前头文件")
 		self.config_title = QLineEdit()
 		self.config_title.setReadOnly(True)
 		hbox.addWidget(name)
 		hbox.addWidget(self.config_title)
 
-		self.configs = QGridLayout()
+		self.infos = QGridLayout()
 		for i in range(0,1):
-			for j in range(0,3):
+			for j in range(0,4):
 				if j == 0:
-					if i == 0:
-						item = QLabel(u"头文件路径")
+					item = QLabel(u"头文件路径")
 				if j == 1:
-					if i == 0:
-						item = QComboBox()
-						item.currentIndexChanged.connect(self.onConfigFileSelect)
+					item = QLineEdit()
+					item.setReadOnly(True)
 				if j == 2:
-					if i == 0:
-						item = QPushButton(u"浏览")
-						item.clicked.connect(self.configButtonClicked)
+					item = QComboBox()
+					item.currentIndexChanged.connect(self.onConfigFileSelect)
+				if j == 3:
+					item = QPushButton(u"浏览")
+					item.clicked.connect(self.onConfigButtonClicked)
 
-				self.configs.addWidget(item,i,j)
+				self.infos.addWidget(item,i,j)
+
+		self.configs = QGridLayout()
 
 		vbox = QVBoxLayout()
 		vbox.addLayout(hbox)
+		vbox.addLayout(self.infos)
 		vbox.addLayout(self.configs)
 		self.tab2_layout.addLayout(vbox)
-	def onXXXChanged(self,index):
-		print "%d" %index
+
+	def setStatusPrompt(self,text,color):	
+		self.status.setText(text)
+		self.palette.setColor(self.status.backgroundRole(),QColor("%s" %color))
+		self.status.setPalette(self.palette)
+
+	def onTabChanged(self):
+		pass
+
         def onReturnPressed(self):
                 lineEdit = self.sender()
                 row,col = self.getPosition(lineEdit,self.path)
 		keys = self.default.keys()
 		self.netclient.sendMessage(keys[row]+":"+self.sender().text())
 
-        def onNetWork(self):
-                pass
 
-        def textChanged(self,text):
+        def onTextChanged(self,text):
                 lineEdit = self.sender()
                 row,col = self.getPosition(lineEdit,self.path)
                 if run_system == "Linux":
@@ -580,71 +685,118 @@ class TSTools(QWidget):
                                 for p in os.listdir(self.top):
                                         platform.addItem(p)
 		elif run_system == "Windows":
-			if row == 1:
-				print "send modules"
-				reply = self.netclient.sendMessage("module")
-				if reply == "ready":
-					self.sendDir(self.sender().text())
-					self.netclient.sendMessage("complete")
+			if row == 0:
+				kernel = lineEdit.text()
+				if kernel.split("/")[-1] == "Kernels":
+					reply = self.netclient.sendMessage("kernel:"+"%s" %kernel)
+			elif row == 1:
+				pass
 			elif row == 2:
 				self.out = lineEdit.text()
 
-        def slotTestSignal(self,status,what):
-                if status == "running":
-                        if what == 0:
-                                if language == 0:
-                                        ch = u"内核正在编译中"
-                                elif language == 1:
-                                        ch = "Compiling Kernel"
-                        if what == 1:
-                                if language == 0:
-                                        ch = u"模块正在编译中"
-                                elif language == 1:
-                                        ch = "Compiling Module"
-                        if what == 2:
-                                ch = u"正在编译"
-                        color = "yellow"
-                elif status == "pass":
-                        color = "green"
-                        if what == 0:
-                                if language == 0:
-                                        ch = u"内核编译通过"
-                                elif language == 1:
-                                        ch = "Kernel Compile Pass"
-                        if what == 1:
-                                if language == 0:
-                                        ch = u"模块编译通过"
-                                elif language == 1:
-                                        ch= "Module Compile Pass"
-                        if what == 2:
-                                if language == 0:
-                                        ch = u"全部编译通过"
-                                elif language == 1:
-                                        ch = "All Compile Pass"
-                elif status == "fail":
-                        color = "red"
-                        if what == 0:
-                                if language == 0:
-                                        ch = u"内核编译失败"
-                                elif language == 1:
-                                        ch = "Kernel Compile Failed"
-                        if what == 1:
-                                if language == 0:
-                                        ch = u"模块编译失败"
-                                elif language == 1:
-                                        ch = "Module Compile Failed"
-                elif status == "nothing":
-                        color = "blue"
-                        if what == 0:
-                                if language == 0:
-                                        ch = u"内核未编译"
-                                elif language == 1:
-                                        ch = "Kernel Not Compiled"
-                        if what == 1:
-                                if language == 0:
-                                        ch = u"模块未编译"
-                                elif language == 1:
-                                        ch = "Module Not Compiled"
+        def onParseResult(self,status,what):
+		tmp = status.split(":")
+		ch = ""
+		color = ""
+		if tmp[0] == "pull":
+			if tmp[1] == "kernel" :
+				if tmp[-1] == "ok":
+					if language == 0:
+						ch = u"成功下载内核镜像"
+						color = "green"
+				elif tmp[-1] == "miss":
+					if language == 0:
+						ch = u"找不到内核镜像"
+						color = "red"
+				elif tmp[-1] == "running":
+					if language == 0:
+						ch = u"正在下载内核镜像"
+						color = "yellow"
+
+			if tmp[1] == "module" :
+				if tmp[-1] == "ok":
+					if language == 0:
+						ch = u"成功下载驱动模块"
+						color = "green"
+				elif tmp[-1] == "miss":
+					if language == 0:
+						ch = u"找不到驱动模块"
+						color = "red"
+				elif tmp[-1] == "running":
+					if language == 0:
+						ch = u"正在下载驱动模块"
+						color = "yellow"
+			if tmp[1] == "all":
+				if tmp[-1] == "ok":
+					if language == 0:
+						ch = u"镜像下载成功"
+						color = "green"
+				elif tmp[-1] == "miss":
+					if language == 0:
+						ch = u"内核或者模块缺失"
+						color = "red"
+				elif tmp[-1] == "running":
+					if language == 0:
+						ch = u"正在下载镜像"
+						color = "yellow"
+
+                elif tmp[0] == "compile":
+			if tmp[1] == "kernel":
+				if tmp[-1] == "pass":
+					color = "green"
+					if language == 0:
+						ch = u"内核编译通过"
+					elif language == 1:
+						ch = "Kernel Compile Pass"
+				elif tmp[-1] == "fail":
+					color = "red"
+					if language == 0:
+						ch = u"内核编译失败"
+					elif language == 1:
+						ch = "Kernel Compile Failed"
+				elif tmp[-1] == "running":
+					color = "yellow"
+					if language == 0:
+						ch = u"内核正在编译中"
+					elif language == 1:
+						ch = "Compiling Kernel"
+
+			elif tmp[1] == "module":
+				if tmp[2] == "pass":
+					color = "green"
+					if language == 0:
+						ch = u"模块编译通过"
+					elif language == 1:
+						ch= "Module Compile Pass"
+				elif tmp[2] == "fail":
+					color = "red"
+					if language == 0:
+						ch = u"模块编译失败"
+					elif language == 1:
+						ch = "Module Compile Failed"
+				elif tmp[2] == "running":
+					color = "yellow"
+					if language == 0:
+						ch = u"模块正在编译中"
+					elif language == 1:
+						ch = "Compiling Module"
+
+
+                elif tmp[0] == "push":
+			if tmp[1] == "module": 
+				print tmp[2]
+				if tmp[2] == "running":
+					color = "yellow"
+					if language == 0:
+						ch = u"正在上传源码"
+					elif language == 1:
+						ch = "Kernel Not Compiled"
+				if tmp[2] == "ok":
+					color = "green"
+					if language == 0:
+						ch = u"源码上传成功"
+					elif language == 1:
+						ch = "Module Not Compiled"
 
                 self.status.setText(ch)
                 self.palette.setColor(self.status.backgroundRole(),QColor("%s" %color))
@@ -653,62 +805,66 @@ class TSTools(QWidget):
                 row,col = self.getPosition(self.sender(),self.tools)
                 if row == 0:
                         if self.sender().text() == self.toolnames[0][0]:
-				if run_system == "Linux":
-					what = 0
-				elif run_system == "Windows":
-					status = self.netclient.sendMessage("Kernel")
-					if status == "running":
-						self.status.setText(u"正在编译中")
-					elif status == "ok":
-						self.status.setText(u"编译通过")
-					elif status == "fail":
-						self.status.setText(u"编译失败")
+				what = 0
+				if run_system == "Windows":
+					cmd = "compile:kernel"
                         elif self.sender().text() == self.toolnames[0][1]:
-				if run_system == "Linux":
-					what = 1
-				elif run_system == "Windows":
-					self.netclient.sendMessage("Module")
+				what = 1
+				if run_system == "Windows":
+					cmd = "compile:module"
                         elif self.sender().text() == self.toolnames[0][2]:
-				if run_system == "Linux":
-					what = 2
-				elif run_system == "Windows":
-					self.netclient.sendMessage("All")
+				what = 2
+				if run_system == "Windows":
+					cmd = "compile:all"
+			if run_system == "Windows":
+				self.worker = ClientSend(self.netclient)
+				self.worker.obj.networkSignal.connect(self.onParseResult)
+				self.worker.setArgs(cmd,what,self.out)
+				self.tp.start(self.worker)
 			if run_system == "Linux":
-				print row,col
 				runnable = Compiler(self.platform,self.kernel,self.module,self.toolchain,what)
-				runnable.obj.compilerSignal.connect(self.slotTestSignal)
+				runnable.obj.compilerSignal.connect(self.onParseResult)
 				self.tp.start(runnable)
                 elif row == 1:
 			files = []
+			resolution = self.lists.itemAtPosition(0,4).widget().currentText()
 			if col == 0:
-				cmd = "get:kernel"
+				cmd = "pull:kernel:%s" %resolution
 			elif col == 1:
-				cmd = "get:module"
+				cmd = "pull:module:%s" %resolution
 			elif col == 2:
-				cmd = "get:all"
-                        self.worker = ClientSend(self.netclient,cmd,col,self.out)
+				cmd = "pull:all:%s" %resolution
+                        self.worker = ClientSend(self.netclient)
+			self.worker.obj.networkSignal.connect(self.onParseResult)
+			self.worker.setArgs(cmd,col,self.out)
                         self.tp.start(self.worker)
                 elif row == 2:
-                        ok = self.db.open()
-                        if ok:
-                                query = QSqlQuery()
-                                if col == 0:
-                                        paths = self.default.keys()[:4]
-                                        platforms = self.default.keys()[4:len(self.default)]
-                                        for i in range(0,len(paths)):
-                                                self.default[paths[i]] = self.path.itemAtPosition(i,1).widget().text()
-                                        for i in range(0,len(platforms)):
-                                                self.default[platforms[i]] = self.lists.itemAtPosition(0,i).widget().currentText()
+			if col == 0 or col == 2:
+				ok = self.db.open()
+				if ok:
+					query = QSqlQuery()
+					if col == 0:
+						paths = self.default.keys()[:4]
+						platforms = self.default.keys()[4:len(self.default)]
+						for i in range(0,len(paths)):
+							self.default[paths[i]] = self.path.itemAtPosition(i,1).widget().text()
+						for i in range(0,len(platforms)):
+							self.default[platforms[i]] = self.lists.itemAtPosition(0,i).widget().currentText()
 
-                                        for key in self.default.keys():
-                                                cmd = "update TSTools set path=\"%s\" where name=\"%s\"" %(self.default[key],key)
-						print cmd
-                                                query.exec_(cmd)
-                                if col == 2:
-                                        for key in self.default.keys():
-                                                cmd = "update TSTools set path=\"""\" where name=\"%s\"" %(key)
-                                                query.exec_(cmd)
-
+						for key in self.default.keys():
+							cmd = "update TSTools set path=\"%s\" where name=\"%s\"" %(self.default[key],key)
+							query.exec_(cmd)
+					if col == 2:
+						for key in self.default.keys():
+							cmd = "update TSTools set path=\"""\" where name=\"%s\"" %(key)
+							query.exec_(cmd)
+			elif col == 1:
+				cmd = "push:module"
+				self.module = self.path.itemAtPosition(1,1).widget().text()
+				self.worker = ClientSend(self.netclient)
+				self.worker.obj.networkSignal.connect(self.onParseResult)
+				self.worker.setArgs(cmd,-1,self.module)
+				self.tp.start(self.worker)
 
         def onCurrentIndexChanged(self,name):
                 row,col = self.getPosition(self.sender(),self.lists)
@@ -736,6 +892,7 @@ class TSTools(QWidget):
 	        	if col == 0:
 	        		self.platform = self.sender().currentText()
 				reply = self.netclient.sendMessage("platform:"+"%s" %self.platform)
+				print reply
 				if reply != "empty":
 					self.lists.itemAtPosition(0,1).widget().clear()
 					for vender in reply.split(":")[0:-1]:
@@ -743,7 +900,7 @@ class TSTools(QWidget):
 				else:
 					self.lists.itemAtPosition(0,1).widget().clear()
 
-			elif col == 1:
+			elif col == 1:	
 				self.vender = self.sender().currentText()
 				reply = self.netclient.sendMessage("vender:"+"%s" %self.vender)
 				print reply
@@ -762,8 +919,29 @@ class TSTools(QWidget):
 			elif col == 2:
 				self.version = self.sender().currentText()
 				reply = self.netclient.sendMessage("version:"+"%s" %self.version)
+				print reply
 				if reply == "success":
-					print "set kernel success"
+					if self.platform == "Rockchip":
+						##util above codes default value has been set,so use a function may be a better way
+						##resolution was not read from files,so we add two default here
+						##and it maybe changed with default values
+						fp = open("TSTools.cfg","rb")
+						for line in fp.readlines():
+							if line.split()[0] == "resolution":
+								resolutions = line.split()[1:]
+								resolution = self.lists.itemAtPosition(0,4).widget()
+								if resolution.count() == 0:
+									for i in range(0,len(resolutions)):
+										resolution.addItem(resolutions[i])
+								else:
+									for i in range(0,len(resolutions)):
+										item_found = False
+										for j in range(0,resolution.count()):
+											if resolution.itemText(j) == resolutions[i]:
+												item_found = True
+												break
+										if not item_found:
+											resolution.addItem(resolutions[i])	
 			elif col == 3:
 				self.toolchain = self.sender().currentText()
 				reply = self.netclient.sendMessage("toolchain:"+"%s" %self.toolchain)
@@ -771,6 +949,19 @@ class TSTools(QWidget):
 					self.path.itemAtPosition(3,1).widget().setText(reply)
 				else:
 					self.path.itemAtPosition(3,1).widget().clear()
+			elif col == 4:
+				if self.sender().currentText() != "":
+					self.netclient.client.send("config:resolution:"+"%s" %self.sender().currentText())
+					reply = self.netclient.client.recv(512)
+					status = reply.split(":")
+					if status[0] == "fail":
+						if status[1] == "kernel":
+							self.setStatusPrompt(u"内核没有设置","red")
+						elif status[2] == "config_file":
+							self.setStatusPrompt(u"未找到配置文件","red")
+					elif status[0] == "success":
+						self.setStatusPrompt(u"成功设置内核配置文件:%s" %status[1],"green")
+
 
 
         def getPosition(self,widget,grid):
@@ -778,45 +969,91 @@ class TSTools(QWidget):
                 row,col = grid.getItemPosition(idx)[:2]
                 return (row,col)
 
-	def onConfigFileSelect(self):
-		filename = self.sender().currentText()
-		abspath = self.config_path+"/"+filename
-		self.config_title.setText(abspath)
-		fp = open(abspath,"w+")
-		i = 1
-		for line in fp.readlines():
-			print line
-			for j in range(0,3):
-				if j == 0:
-					item = QLabel(line.split(" ")[1])
-				elif j == 1:
-					item = QLineEdit(line.split(" ")[-1])
-				elif j == 2:
-					item = QPushButton(u"写入")
 
-				self.configs.addWidget(item,i,j)
-			i += 1
-		       # for i in range(1,count):
-		       # 	for j in range(0,3):
-		       # 		if j == 0:
-		       # 			item = QLabel(line.split(" ")[1])
-		       # 		elif j == 1:
-		       # 			item = QLineEdit(line.split(" ")[-1])	
-		       # 		elif j == 2:
-		       # 			item = QPushButton(u"写入")
-		       # 			self.configs.addWidget(item,1,1)
-		       # 		
+	def addItemToConfigs(self,line,row):
+	        for i in range(0,3):
+	        	if i == 0:
+	        		item = QLabel(line.split()[1])
+	        	elif i == 1:
+	        		item = QLineEdit(line.split()[2])
+	        	elif i == 2:
+	        		item = QPushButton(u"写入")
+	        	self.configs.addWidget(item,row,i)
+	def parseHeader(self,path):
+		i = 0
+		fp = open(path,"rb")
+		else_block = False
+		row_count = 0
+		block = []
+		handled = []
+		defines = []
+		for line in fp.readlines():
+			if line[0:2] == "\\":
+				continue
+			if len(line.split()) > 0:
+				if line.split()[0] == "#ifndef":
+					block.append(True)
+				elif line.split()[0] == "#ifdef":
+					if block[-1]:
+						if line.split()[1] in defines:
+							block.append(True)
+						else:
+							block.append(False)
+				elif line.split()[0] == "#else":
+					if len(block) > 1:
+						if block[-1]:
+							else_block = False
+						else:
+							else_block = True
+				elif line.split()[0] == "#define":
+					if len(block) == 1:
+						if len(line.split()) == 2:
+							defines.append(line.split()[1])
+						elif len(line.split()) > 2:
+							if line.split()[2][0:2] == "\\":
+								defines.append(line.split()[1])
+							else:
+								self.addItemToConfigs(line,row_count)
+								row_count += 1
+					else:
+						if len(block) > 1:
+							if block[-1]:
+								self.addItemToConfigs(line,row_count)
+								row_count += 1
+							else:
+								if else_block:
+									self.addItemToConfigs(line,row_count)
+									row_count += 1
+				elif line.split()[0] == "#if":
+					if block[-1]:
+						if line.split()[1] == "1":
+							block.append(True)
+						elif line.split()[1] == "0":
+							block.append(False)
+				elif line.split()[0] == "#endif":
+					block.pop()
+			handled.append(line)
+
+	def onConfigFileSelect(self):
+		for i in reversed(range(self.configs.count())):
+			self.configs.itemAt(i).widget().setParent(None)
+		filename = self.sender().currentText()
+		abspath = self.config_path+"\\"+filename
+		self.config_title.setText(abspath)
+		if abspath.split(".")[-1] == "h":
+			self.parseHeader(abspath)
                 
-	def configButtonClicked(self,name):
-		row,col = self.getPosition(self.sender(),self.configs)
+	def onConfigButtonClicked(self,name):
+		row,col = self.getPosition(self.sender(),self.infos)
 		if row == 0:
 			fname = QFileDialog.getExistingDirectory(self,'Open file','/')
 			self.config_path = fname
-			self.configs.itemAtPosition(row,1).widget().clear()
+			self.infos.itemAtPosition(row,1).widget().setText(self.config_path)
+			self.infos.itemAtPosition(row,2).widget().clear()
 			for f in os.listdir(fname):
 				if f.split(".")[-1] == "h":
-					self.configs.itemAtPosition(row,1).widget().addItem(f)
-        def browseButtonClicked(self,name):
+					self.infos.itemAtPosition(row,2).widget().addItem(f)
+        def onBrowseButtonClicked(self,name):
                 button = self.sender()
                 row,col = self.getPosition(button,self.path)
                 if run_system == "Linux":
@@ -852,9 +1089,13 @@ def main():
                 elif sys.argv[1] == "-s":
                         T = TSTools(1)
         else:
-                T = TSTools(-1)
+		if run_system == "Windows":
+			T = TSTools(0)
+		else:
+			T = TSTools(-1)
         sys.exit(app.exec_())
 if __name__ == "__main__":
         language = getLanguageType()
         run_system = platform.system()
+	computer_name = platform.uname()[1]
         main()
