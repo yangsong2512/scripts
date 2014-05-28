@@ -81,6 +81,8 @@ class ClientSend(QRunnable):
 			if self.col == 1 or self.col == 2:
 				filename = "%s" %self.out+"\\"+"cn1100_linux_"+getFormatTime("%m%d%H%M")+".ko"
 				files.append(filename)
+			print files
+			status = True
 			for i in range(0,len(files)):
 				self.obj.networkSignal.emit(self.message+":running",-1)
 				fp = open(files[i],"wb+")
@@ -498,12 +500,14 @@ class TSTools(QWidget):
 		self.tab_widget = QTabWidget()
 		self.tab_widget.currentChanged[int].connect(self.onTabChanged)
 		tab1 = QWidget()
-		tab2 = QWidget()
+		tab2 = QScrollArea()
+		tab2.setWidget(QWidget())
 		tab3 = QWidget()
 		
 		self.tab1_layout = QVBoxLayout(tab1)
-		self.tab2_layout = QVBoxLayout(tab2)
-		self.tabe_layout = QVBoxLayout(tab3)
+		self.tab2_layout = QVBoxLayout(tab2.widget())
+		tab2.setWidgetResizable(True)
+		self.tab3_layout = QVBoxLayout(tab3)
 
 		self.tab_widget.addTab(tab1,u"内核编译")
 		self.tab_widget.addTab(tab2,u"驱动配置")
@@ -631,24 +635,58 @@ class TSTools(QWidget):
 				if j == 2:
 					item = QComboBox()
 					item.currentIndexChanged.connect(self.onConfigFileSelect)
+					item.setMinimumWidth(150)
 				if j == 3:
 					item = QPushButton(u"浏览")
 					item.clicked.connect(self.onConfigButtonClicked)
 
+				item.setMinimumHeight(25)
 				self.infos.addWidget(item,i,j)
 
 		self.configs = QGridLayout()
+		
+		saveBox = QHBoxLayout()
+		saveBox.addStretch(1)
+		self.saveButton = QPushButton(u"保存")
+		saveBox.addWidget(self.saveButton)
+		self.saveButton.clicked.connect(self.onConfigButtonClicked)
+		self.checkAll = QCheckBox()
+		self.checkAll.stateChanged[int].connect(self.onCheckBoxStateChanged)
+		saveBox.addWidget(self.checkAll)
 
 		vbox = QVBoxLayout()
 		vbox.addLayout(hbox)
 		vbox.addLayout(self.infos)
 		vbox.addLayout(self.configs)
+		vbox.addLayout(saveBox)
 		self.tab2_layout.addLayout(vbox)
 
 	def setStatusPrompt(self,text,color):	
 		self.status.setText(text)
 		self.palette.setColor(self.status.backgroundRole(),QColor("%s" %color))
 		self.status.setPalette(self.palette)
+
+	def onCheckBoxStateChanged(self,text):
+		row_count = 0
+		if self.sender() == self.checkAll:
+			row_count = self.configs.count()/3
+			checked = self.sender().isChecked()
+			for i in range(0,row_count):
+				item = self.configs.itemAtPosition(i,2).widget()
+				if checked:
+					item.setChecked(True)
+				else:
+					item.setChecked(False)
+				
+		else:
+			row,col = self.getPosition(self.sender(),self.configs)
+			key = self.configs.itemAtPosition(row,0).widget().text()
+			value = self.configs.itemAtPosition(row,1).widget().text()
+			if self.sender().isChecked():
+				self.updates["%s" %key] ="%s" %value
+			else:
+				if key in self.updates.keys():
+					del self.updates["%s" %key]
 
 	def onTabChanged(self):
 		pass
@@ -972,85 +1010,196 @@ class TSTools(QWidget):
 	        for i in range(0,3):
 	        	if i == 0:
 	        		item = QLabel(line.split()[1])
+				item.setMinimumHeight(25)
 	        	elif i == 1:
 	        		item = QLineEdit(line.split()[2])
-	        	elif i == 2:
-	        		item = QPushButton(u"写入")
+				item.setMinimumHeight(25)
+			elif i == 2:
+				item = QCheckBox()
+				item.stateChanged[int].connect(self.onCheckBoxStateChanged)
 	        	self.configs.addWidget(item,row,i)
-	def parseHeader(self,path):
-		i = 0
-		fp = open(path,"rb")
-		else_block = False
+	def parseHeader(self,contents,direct):
+		if direct == 1:
+			keys = self.updates.keys()
+		else_block = []
 		row_count = 0
 		block = []
-		handled = []
 		defines = []
-		for line in fp.readlines():
-			if line[0:2] == "\\":
-				continue
+		handled = []
+		for line in contents:
 			if len(line.split()) > 0:
-				if line.split()[0] == "#ifndef":
-					block.append(True)
+				tmp = line.split()
+				line = ""
+				for i in range(0,len(tmp)):
+					line += tmp[i] + " "
+				line += "\n"
+				if line.split()[0][0:2] == "\\" or line.split()[0][0:2] == "\*":
+					continue
+				elif line.split()[0] == "#ifndef":
+					block.append({0:True})
+
 				elif line.split()[0] == "#ifdef":
-					if block[-1]:
+					key = block[-1].keys()[0]
+					value = block[-1][key]
+					if len(else_block) == 0:
+						if value:
+							if line.split()[1] in defines:
+								block.append({(key+1):True})
+							else:
+								block.append({(key+1):False})
+						else:
+							block.append({(key+1):False})
+					elif else_block[-1] == -1:
+						block.append({(key+1):False})
+					elif else_block[-1] == 1:
 						if line.split()[1] in defines:
-							block.append(True)
+							block.append({(key+1):True})
 						else:
-							block.append(False)
+							block.append({(key+1):False})
+
 				elif line.split()[0] == "#else":
-					if len(block) > 1:
-						if block[-1]:
-							else_block = False
-						else:
-							else_block = True
+					key = block[-1].keys()[0]
+					value = block[-1][key]
+					count = len(else_block)
+					if count == 0:
+						if key == 1:
+							if value:
+								else_block.append(-1)
+							else:
+								else_block.append(1)
+						elif key > 1:
+							keytmp = block[-2].keys()[0]
+							valuetmp = block[-2][keytmp]
+							if valuetmp:
+								if value:
+									else_block.append(-1)
+								else:
+									else_block.append(1)
+							else:
+								else_block.append(-1)
+					elif count > 0:
+						if else_block[-1] == 1:
+							if value:
+								else_block.append(-1)
+							else:
+								else_block.append(1)
+						elif else_block[-1] == -1:
+							else_block.append(-1)
 				elif line.split()[0] == "#define":
-					if len(block) == 1:
+					key = block[-1].keys()[0]
+					value = block[-1][key]
+					if key == 0:
 						if len(line.split()) == 2:
 							defines.append(line.split()[1])
 						elif len(line.split()) > 2:
 							if line.split()[2][0:2] == "\\":
 								defines.append(line.split()[1])
 							else:
-								self.addItemToConfigs(line,row_count)
-								row_count += 1
-					else:
-						if len(block) > 1:
-							if block[-1]:
-								self.addItemToConfigs(line,row_count)
-								row_count += 1
-							else:
-								if else_block:
+								if direct == 0:
 									self.addItemToConfigs(line,row_count)
 									row_count += 1
+								elif direct == 1:
+									tmpkey = line.split()[1]
+									if tmpkey in keys:
+										tmp = line.split()
+										line = ""
+										tmp[2] = self.updates[tmpkey]
+										for i in range(0,len(tmp)):
+											line += tmp[i] + " "
+										line+="\n"
+					elif key > 0 and len(line.split()) > 2:
+						if value:
+							if direct == 0:
+								self.addItemToConfigs(line,row_count)
+								row_count += 1
+							elif direct == 1:
+								tmpkey = line.split()[1]
+								if tmpkey in keys:
+									tmp = line.split()
+									line = ""
+									tmp[2] = self.updates[tmpkey]
+									for i in range(0,len(tmp)):
+										line += tmp[i] + " "
+									line+="\n"
+						else:
+							if len(else_block) > 0:
+								if else_block[-1] == 1:
+									if direct == 0:
+										self.addItemToConfigs(line,row_count)
+										row_count += 1
+									elif direct == 1:
+										tmpkey = line.split()[1]
+										if tmpkey in keys:
+											tmp = line.split()
+											line = ""
+											tmp[2] = self.updates[tmpkey]
+											for i in range(0,len(tmp)):
+												line += tmp[i] + " "
+											line+="\n"
+
+
 				elif line.split()[0] == "#if":
-					if block[-1]:
+					key = block[-1].keys()[0]
+					value = block[-1][key]
+					if value:
 						if line.split()[1] == "1":
-							block.append(True)
-						elif line.split()[1] == "0":
-							block.append(False)
+							block.append({(key+1):True})
+						else:
+							block.append({(key+1):False})
+					else:
+						tmpkey = block[-2].keys()[0]
+						tmpvalue = block[-2][key]
+						if else_block[-1] == 1:
+							if line.split()[1] == "1":
+								block.append({(key+1):True})
+							else:
+								block.append({(key+1):False})
+						else:
+							block.append({(key+1):False})
+
+
 				elif line.split()[0] == "#endif":
+					if len(else_block) > 0:
+						else_block.pop()
 					block.pop()
-			handled.append(line)
+				handled.append("%s" %line)
+
+		if direct == 1:
+			fp = open(self.config_file,"w+")
+			for line in handled:
+				fp.write(line)
+
+			fp.close()
+
 
 	def onConfigFileSelect(self):
 		for i in reversed(range(self.configs.count())):
 			self.configs.itemAt(i).widget().setParent(None)
 		filename = self.sender().currentText()
-		abspath = self.config_path+"\\"+filename
-		self.config_title.setText(abspath)
-		if abspath.split(".")[-1] == "h":
-			self.parseHeader(abspath)
+		self.config_file = self.config_path+"\\"+filename
+		self.config_title.setText(self.config_file)
+		if self.config_file.split(".")[-1] == "h":
+			self.updates = {}
+			fp = open(self.config_file,"rb")
+			self.contents = fp.readlines()
+			self.parseHeader(self.contents,0)
+			fp.close()
                 
 	def onConfigButtonClicked(self,name):
-		row,col = self.getPosition(self.sender(),self.infos)
-		if row == 0:
-			fname = QFileDialog.getExistingDirectory(self,'Open file','/')
-			self.config_path = fname
-			self.infos.itemAtPosition(row,1).widget().setText(self.config_path)
-			self.infos.itemAtPosition(row,2).widget().clear()
-			for f in os.listdir(fname):
-				if f.split(".")[-1] == "h":
-					self.infos.itemAtPosition(row,2).widget().addItem(f)
+		if self.sender() == self.saveButton:
+			keys = self.updates.keys()
+			if len(keys) > 0:
+				self.parseHeader(self.contents,1)
+		else:
+			row,col = self.getPosition(self.sender(),self.infos)
+			if row == 0:
+				fname = QFileDialog.getExistingDirectory(self,'Open file','/')
+				self.config_path = fname
+				self.infos.itemAtPosition(row,1).widget().setText(self.config_path)
+				self.infos.itemAtPosition(row,2).widget().clear()
+				for f in os.listdir(fname):
+					if f.split(".")[-1] == "h":
+						self.infos.itemAtPosition(row,2).widget().addItem(f)
         def onBrowseButtonClicked(self,name):
                 button = self.sender()
                 row,col = self.getPosition(button,self.path)
