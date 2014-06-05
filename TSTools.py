@@ -2,6 +2,7 @@
 #-*-coding:utf-8 -*-
 import sys
 import locale
+import string
 import os
 import collections
 import time
@@ -12,10 +13,12 @@ import thread
 from PyQt4.QtGui import *
 from PyQt4.QtCore import *
 from PyQt4.QtSql import *
+from struct import *
 
 
 global run_system
 global language
+global frame
 
 def getFormatTime(fmt):
 	curtime = time.strftime("%s" %fmt,time.localtime())
@@ -411,6 +414,7 @@ class TSTools(QWidget):
                 self.module = ""
                 self.out = ""
                 self.toolchain = ""
+		frame = 300
                 self.default = collections.OrderedDict([("kernel",""),("module",""),("out",""),\
                                 ("toolchain",""),("platform",""),("vender",""),("version",""),("toolchain_version",""),("resolution","")])
                 self.palette = QPalette()
@@ -502,16 +506,18 @@ class TSTools(QWidget):
 		tab1 = QWidget()
 		tab2 = QScrollArea()
 		tab2.setWidget(QWidget())
-		tab3 = QWidget()
+		tab3 = QScrollArea()
+		tab3.setWidget(QWidget())
 		
 		self.tab1_layout = QVBoxLayout(tab1)
 		self.tab2_layout = QVBoxLayout(tab2.widget())
 		tab2.setWidgetResizable(True)
-		self.tab3_layout = QVBoxLayout(tab3)
+		self.tab3_layout = QVBoxLayout(tab3.widget())
+		tab3.setWidgetResizable(True)
 
 		self.tab_widget.addTab(tab1,u"内核编译")
 		self.tab_widget.addTab(tab2,u"驱动配置")
-		self.tab_widget.addTab(tab3,u"ADB调试")
+		self.tab_widget.addTab(tab3,u"数据显示")
 
                 self.tools = QGridLayout()
                 for i in range(0,len(self.toolnames)):
@@ -557,7 +563,7 @@ class TSTools(QWidget):
                         self.netserver = NetServer(1234)
                         self.tp.start(self.netserver)
                 elif self.toolsType == 0:
-                        self.netclient = NetClient("192.168.1.103",1234,self.tp)
+                        self.netclient = NetClient("192.168.1.106",1234,self.tp)
 			self.worker = ClientSend(self.netclient)
 			self.worker.obj.networkSignal.connect(self.onParseResult)
                         status = self.netclient.connect()
@@ -603,6 +609,7 @@ class TSTools(QWidget):
 
 
 		self.initConfig()
+		self.initData()
 
                 mainlayout = QVBoxLayout()
                 self.tab1_layout.addLayout(self.path)
@@ -615,6 +622,106 @@ class TSTools(QWidget):
 		self.setWindowTitle(u"驱动编译与调试")
                 self.show()
 
+	def readFile(self):
+		for i in range(0,3):
+			count = 0
+			matrix = unpack("300h",self.logData.read(150*4))
+			if i == 0:
+				for j in range(0,15):
+					for k in range(0,10):
+						self.rawLayout.itemAtPosition(j,k).widget().setText("%d" %matrix[count])
+						count += 1
+			if i == 1:
+				for j in range(0,15):
+					for k in range(0,10):
+						self.baseLayout.itemAtPosition(j,k).widget().setText("%d" %matrix[count])
+						count += 1
+			if i == 2:
+				for j in range(0,15):
+					for k in range(0,10):
+						self.diffLayout.itemAtPosition(j,k).widget().setText("%d" %matrix[count])
+						count += 1
+
+	def onLogSelect(self):
+		if self.sender() == self.logSelect:
+			fname = QFileDialog.getOpenFileName(self,'Open file','/')
+			self.logPath.setText(fname)
+			if fname != "":
+				self.logData = open(fname,"rb")
+				self.readFile()
+		elif self.sender() == self.nextbutton:
+			self.readFile()
+		elif self.sender() == self.prebutton:
+			self.logData.seek(-600*3*2,1)
+			self.readFile()
+		elif self.sender() == self.resetbutton:
+			self.logData.seek(0,0)
+			self.readFile()
+
+		elif self.sender() == self.jumpbutton:
+			text, ok = QInputDialog.getText(self, u"跳转至",u"帧数:")
+			if ok:
+				num = int(text)
+				self.logData.seek(600*3*num,0)
+				self.readFile()
+		
+
+	def initData(self):
+		vbox = QVBoxLayout()
+		hbox = QHBoxLayout()
+		headbox = QHBoxLayout()
+		rawGroup = QGroupBox(u"原始数据")
+		diffGroup = QGroupBox(u"差分数据")
+		baseGroup = QGroupBox(u"基准数据")
+
+		buttonbox = QHBoxLayout()
+		self.nextbutton = QPushButton(u"下一帧")
+		self.nextbutton.clicked.connect(self.onLogSelect)
+		buttonbox.addWidget(self.nextbutton)
+		self.prebutton = QPushButton(u"上一帧")
+		self.prebutton.clicked.connect(self.onLogSelect)
+		buttonbox.addWidget(self.prebutton)
+		self.resetbutton = QPushButton(u"复位")
+		self.resetbutton.clicked.connect(self.onLogSelect)
+		buttonbox.addWidget(self.resetbutton)
+		self.jumpbutton = QPushButton(u"跳转至")
+		self.jumpbutton.clicked.connect(self.onLogSelect)
+		buttonbox.addWidget(self.jumpbutton)
+		buttonbox.addStretch(1)
+		
+		self.logPath = QLineEdit()
+		headbox.addWidget(self.logPath)
+		self.logSelect = QPushButton(u"浏览")
+		headbox.addWidget(self.logSelect)
+		self.logSelect.clicked.connect(self.onLogSelect)
+		headbox.addStretch(1)
+		
+		self.rawLayout = QGridLayout()
+		for i in range(0,15):
+			for j in range(0,10):
+				item = QLabel("1000")
+				self.rawLayout.addWidget(item,i,j)
+		rawGroup.setLayout(self.rawLayout)
+
+		self.diffLayout = QGridLayout()
+		for i in range(0,15):
+			for j in range(0,10):
+				item = QLabel("1000")
+				self.diffLayout.addWidget(item,i,j)
+		diffGroup.setLayout(self.diffLayout)
+		self.baseLayout = QGridLayout()
+		for i in range(0,15):
+			for j in range(0,10):
+				item = QLabel("1000")
+				self.baseLayout.addWidget(item,i,j)
+		baseGroup.setLayout(self.baseLayout)
+		hbox.addWidget(rawGroup)
+		hbox.addWidget(baseGroup)
+		hbox.addWidget(diffGroup)
+		vbox.addLayout(headbox)
+		vbox.addLayout(hbox)
+		vbox.addLayout(buttonbox)
+		self.tab3_layout.addLayout(vbox)
 	def initConfig(self):
 		self.config_path = ""
 		hbox = QHBoxLayout()
@@ -688,8 +795,9 @@ class TSTools(QWidget):
 				if key in self.updates.keys():
 					del self.updates["%s" %key]
 
-	def onTabChanged(self):
-		pass
+	def onTabChanged(self,index):
+		if index == 2:
+			pass
 
         def onReturnPressed(self):
                 lineEdit = self.sender()
